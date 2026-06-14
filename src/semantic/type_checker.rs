@@ -248,14 +248,29 @@ fn type_check_stmt(
 
             // Verifica cada um dos cases
             let mut checked_cases = Vec::new();
+            let mut seen_cases = Vec::new();
             for (lit, stmts) in cases {
+                if seen_cases.contains(lit) {
+                    return Err(TypeError::new(format!(
+                        "duplicate case label in switch: {:?}",
+                        lit
+                    )));
+                }
+                seen_cases.push(lit.clone());
+
                 // Descobre o tipo do literal do case atual
                 let lit_ty = match lit {
                     Literal::Int(_) => Type::Int,
                     Literal::Bool(_) => Type::Bool,
+                    _ => {
+                        return Err(TypeError::new(format!(
+                            "switch case literal type not supported: {:?}",
+                            lit
+                        )));
+                    }
                 };
 
-            // Garante que o tipo do literal é compatível com o tipo do target
+                // Garante que o tipo do literal é compatível com o tipo do target
                 if !types_compatible(&target_checked.ty, &lit_ty) {
                     return Err(TypeError::new(format!(
                         "switch case literal type mismatch: expected {:?}, got {:?}",
@@ -263,7 +278,7 @@ fn type_check_stmt(
                     )));
                 }
 
-            // Cria um novo escopo para as instruções deste case
+                // Cria um novo escopo para as instruções deste case
                 let snapshot = env.snapshot();
                 let mut checked_stmts = Vec::new();
                 for stmt in stmts {
