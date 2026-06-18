@@ -1,4 +1,4 @@
-use crate::ir::ast::{CheckedProgram, CheckedStmt, Statement, Expr, CheckedExpr, Literal, Type};
+use crate::ir::ast::{CheckedProgram, CheckedFunDecl, CheckedStmt, Statement, Expr, CheckedExpr, Literal, Type};
 use crate::ir::tac::{TACProgram, Instruction, Address, Operator};
 
 
@@ -31,16 +31,20 @@ fn translate_program(program: CheckedProgram, env: &mut Environment) -> TACProgr
     let main_fn = program.main_function();
     match main_fn {
         None => unreachable!("[Impossible] program must have a main function"),
-        Some(f) => translate_function_body((*f.body).clone(), env),
+        Some(f) => translate_function(f.clone(), env),
     }
+
 }
 
-fn translate_function_body(body: CheckedStmt, env: &mut Environment) -> TACProgram {
-    if let Statement::Block { seq : stmts } = body.stmt {
-        stmts.into_iter().flat_map(|stmt| translate_statement(stmt, env)).collect::<Vec<_>>()
-    } else {
-        translate_statement(body, env)
-    }
+fn translate_function(function: CheckedFunDecl, env: &mut Environment) -> TACProgram {
+    let mut instructions =
+        if let Statement::Block { seq : stmts } = function.body.stmt {
+            stmts.into_iter().flat_map(|stmt| translate_statement(stmt, env)).collect::<Vec<_>>()
+        } else {
+            translate_statement(*(function.body), env)
+        };
+    instructions.insert(0, Instruction::Label(function.name.clone()));
+    instructions
 }
 
 pub fn translate_statement(statement: CheckedStmt, env: &mut Environment) -> Vec<Instruction> {
@@ -63,10 +67,25 @@ pub fn translate_statement(statement: CheckedStmt, env: &mut Environment) -> Vec
                 todo!()
             }
         },
+        Statement::Call{name, args} => {
+            // addresses_and_instructions :: [(Address, [Instruction])]
+            let addresses_and_instructions = args.into_iter().map(|expr| translate_expression(expr, env)).collect::<Vec<_>>();
+            let mut instructions = addresses_and_instructions.iter().fold(vec![], |mut acc, (_, inst)| {acc.extend(inst.clone()); acc});
+
+            // includes a 'param' instruction to the
+            // every addresses built from the arguments.
+            for (addr, _) in &addresses_and_instructions {
+                instructions.push(Instruction::Param(addr.clone()));
+            }
+            instructions.push(Instruction::Call(None, name, addresses_and_instructions.len()));
+            instructions
+        }
         Statement::If{cond, then_branch: then_body, else_branch: Some(else_body)} => {
+            let label_then = env.new_label();
             let label_else = env.new_label();
             let label_end_if = env.new_label();
-            let mut instructions = translate_conditional(*cond, env, label_else.clone());
+            let mut instructions = translate_conditional(*cond, env, label_then.clone(), label_else.clone());
+            instructions.push(Instruction::Label(label_then));
             instructions.extend(translate_statement(*then_body, env));
             instructions.push(Instruction::JMP(label_end_if.clone()));
             instructions.push(Instruction::Label(label_else));
@@ -150,57 +169,50 @@ fn translate_expression(expression: CheckedExpr, env: &mut Environment) -> (Addr
     }
 }
 
-fn translate_conditional(expression: CheckedExpr, env: &mut Environment, false_label: String) -> Vec<Instruction> {
+fn translate_conditional(expression: CheckedExpr, env: &mut Environment, true_label: String, false_label: String) -> Vec<Instruction> {
     match expression.exp {
-        Expr::Literal(Literal::Bool(true)) => vec![],
+        Expr::Literal(Literal::Bool(true))  => vec![Instruction::JMP(true_label)],
         Expr::Literal(Literal::Bool(false)) => vec![Instruction::JMP(false_label)],
         Expr::Ident(name) => {
             let addr = Address::Variable(name.to_string(), expression.ty);
-            let instructions = vec![Instruction::ConditionalJMPFalse(addr, false_label)];
-            instructions
+            vec![Instruction::ConditionalJMP(addr, true_label), Instruction::JMP(false_label)]
         },
-        // AND: short-circuit — if left is false jump immediately; only evaluate right if left is true
         Expr::And(left, right) => {
-            let mut instructions = translate_conditional(*left, env, false_label.clone());
-            instructions.extend(translate_conditional(*right, env, false_label));
+            let label_right = env.new_label();
+            let mut instructions = translate_conditional(*left, env, label_right.clone(), false_label.clone());
+            instructions.push(Instruction::Label(label_right));
+            instructions.extend(translate_conditional(*right, env, true_label, false_label));
             instructions
         },
-        // OR: short-circuit — if left is true skip right entirely; only evaluate right if left is false
         Expr::Or(left, right) => {
-            let label_skip_right = env.new_label();
-            let (l_addr, mut instructions) = translate_expression(*left, env);
-            instructions.push(Instruction::ConditionalJMP(l_addr, label_skip_right.clone()));
-            instructions.extend(translate_conditional(*right, env, false_label));
-            instructions.push(Instruction::Label(label_skip_right));
+            let label_right = env.new_label();
+            let mut instructions = translate_conditional(*left, env, true_label.clone(), label_right.clone());
+            instructions.push(Instruction::Label(label_right));
+            instructions.extend(translate_conditional(*right, env, true_label, false_label));
             instructions
         },
-        // NOT: jump to false_label when the inner expression is true
-        Expr::Not(expr) => {
-            let (addr, mut instructions) = translate_expression(*expr, env);
-            instructions.push(Instruction::ConditionalJMP(addr, false_label));
-            instructions
-        },
-        // Relational operators: jump to false_label using the negated operator
-        Expr::Lt(left, right) => translate_relational(*left, *right, Operator::GTE, false_label, env),
-        Expr::Le(left, right) => translate_relational(*left, *right, Operator::GT,  false_label, env),
-        Expr::Gt(left, right) => translate_relational(*left, *right, Operator::LTE, false_label, env),
-        Expr::Ge(left, right) => translate_relational(*left, *right, Operator::LT,  false_label, env),
-        Expr::Eq(left, right) => translate_relational(*left, *right, Operator::NE,  false_label, env),
-        Expr::Ne(left, right) => translate_relational(*left, *right, Operator::EQ,  false_label, env),
-        // Fallback for plain boolean identifiers/literals
+        Expr::Not(expr) => translate_conditional(*expr, env, false_label, true_label),
+        Expr::Lt(left, right) => translate_relational(*left, *right, Operator::LT,  true_label, false_label, env),
+        Expr::Le(left, right) => translate_relational(*left, *right, Operator::LTE, true_label, false_label, env),
+        Expr::Gt(left, right) => translate_relational(*left, *right, Operator::GT,  true_label, false_label, env),
+        Expr::Ge(left, right) => translate_relational(*left, *right, Operator::GTE, true_label, false_label, env),
+        Expr::Eq(left, right) => translate_relational(*left, *right, Operator::EQ,  true_label, false_label, env),
+        Expr::Ne(left, right) => translate_relational(*left, *right, Operator::NE,  true_label, false_label, env),
         _ => {
             let (addr, mut instructions) = translate_expression(expression, env);
-            instructions.push(Instruction::ConditionalJMPFalse(addr, false_label));
+            instructions.push(Instruction::ConditionalJMP(addr, true_label));
+            instructions.push(Instruction::JMP(false_label));
             instructions
         }
     }
 }
 
-fn translate_relational(left: CheckedExpr, right: CheckedExpr, op: Operator, false_label: String, env: &mut Environment) -> Vec<Instruction> {
+fn translate_relational(left: CheckedExpr, right: CheckedExpr, op: Operator, true_label: String, false_label: String, env: &mut Environment) -> Vec<Instruction> {
     let (l_addr, l_instructions) = translate_expression(left, env);
     let (r_addr, r_instructions) = translate_expression(right, env);
     let mut instructions = l_instructions;
     instructions.extend(r_instructions);
-    instructions.push(Instruction::ConditionalJMPRelational(op, l_addr, r_addr, false_label));
+    instructions.push(Instruction::ConditionalJMPRelational(op, l_addr, r_addr, true_label));
+    instructions.push(Instruction::JMP(false_label));
     instructions
 }
