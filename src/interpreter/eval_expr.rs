@@ -46,7 +46,8 @@ use super::exec_stmt::exec_stmt;
 use super::value::{FnValue, RuntimeError, Value};
 
 /// Evaluate a checked expression to a runtime value.
-pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Value, RuntimeError> {
+/// [Expr] ∈ State → Value (Puramente funcional e sem efeitos colaterais)
+pub fn eval_expr(expr: &CheckedExpr, env: &Environment<Value>) -> Result<Value, RuntimeError> {
     match &expr.exp {
         Expr::Literal(lit) => Ok(eval_literal(lit)),
 
@@ -74,16 +75,9 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
         Expr::Gt(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a > b, |a, b| a > b),
         Expr::Ge(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a >= b, |a, b| a >= b),
 
-        Expr::Eq(l, r) => {
-            let lv = eval_expr(l, env)?;
-            let rv = eval_expr(r, env)?;
-            Ok(Value::Bool(values_equal(&lv, &rv)))
-        }
-        Expr::Ne(l, r) => {
-            let lv = eval_expr(l, env)?;
-            let rv = eval_expr(r, env)?;
-            Ok(Value::Bool(!values_equal(&lv, &rv)))
-        }
+        Expr::Eq(l, r) => Ok(Value::Bool(values_equal(&eval_expr(l, env)?, &eval_expr(r, env)?))),
+
+        Expr::Ne(l, r) => Ok(Value::Bool(!values_equal(&eval_expr(l, env)?, &eval_expr(r, env)?))),
 
         Expr::Not(inner) => match eval_expr(inner, env)? {
             Value::Bool(b) => Ok(Value::Bool(!b)),
@@ -92,28 +86,22 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
                 v
             ))),
         },
-        Expr::And(l, r) => {
-            let lv = eval_expr(l, env)?;
-            match lv {
-                Value::Bool(false) => Ok(Value::Bool(false)),
-                Value::Bool(true) => eval_expr(r, env),
-                v => Err(RuntimeError::new(format!(
-                    "expected bool for 'and', got: {}",
-                    v
-                ))),
-            }
-        }
-        Expr::Or(l, r) => {
-            let lv = eval_expr(l, env)?;
-            match lv {
-                Value::Bool(true) => Ok(Value::Bool(true)),
-                Value::Bool(false) => eval_expr(r, env),
-                v => Err(RuntimeError::new(format!(
-                    "expected bool for 'or', got: {}",
-                    v
-                ))),
-            }
-        }
+        Expr::And(l, r) => match eval_expr(l, env)? {
+            Value::Bool(false) => Ok(Value::Bool(false)),
+            Value::Bool(true) => eval_expr(r, env),
+            v => Err(RuntimeError::new(format!(
+                "expected bool for 'and', got: {}",
+                v
+            ))),
+        },
+        Expr::Or(l, r) => match eval_expr(l, env)? {
+            Value::Bool(true) => Ok(Value::Bool(true)),
+            Value::Bool(false) => eval_expr(r, env),
+            v => Err(RuntimeError::new(format!(
+                "expected bool for 'or', got: {}",
+                v
+            ))),
+        },
 
         Expr::ArrayLit(elems) => {
             let vals: Result<Vec<Value>, RuntimeError> =
@@ -121,26 +109,22 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
             Ok(Value::Array(vals?))
         }
 
-        Expr::Index { base, index } => {
-            let base_val = eval_expr(base, env)?;
-            let idx_val = eval_expr(index, env)?;
-            match (base_val, idx_val) {
-                (Value::Array(elems), Value::Int(i)) => {
-                    let i = i as usize;
-                    elems.into_iter().nth(i).ok_or_else(|| {
-                        RuntimeError::new(format!("array index {} out of bounds", i))
-                    })
-                }
-                (Value::Array(_), idx) => Err(RuntimeError::new(format!(
-                    "array index must be int, got: {}",
-                    idx
-                ))),
-                (base, _) => Err(RuntimeError::new(format!(
-                    "cannot index non-array value: {}",
-                    base
-                ))),
+        Expr::Index { base, index } => match (eval_expr(base, env)?, eval_expr(index, env)?) {
+            (Value::Array(elems), Value::Int(i)) => {
+                let i = i as usize;
+                elems.into_iter().nth(i).ok_or_else(|| {
+                    RuntimeError::new(format!("array index {} out of bounds", i))
+                })
             }
-        }
+            (Value::Array(_), idx) => Err(RuntimeError::new(format!(
+                "array index must be int, got: {}",
+                idx
+            ))),
+            (base, _) => Err(RuntimeError::new(format!(
+                "cannot index non-array value: {}",
+                base
+            )))
+        },
 
         Expr::Call { name, args } => {
             let arg_vals: Result<Vec<Value>, RuntimeError> =
@@ -154,8 +138,7 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
 pub fn eval_call(
     name: &str,
     args: Vec<Value>,
-    env: &mut Environment<Value>,
-) -> Result<Value, RuntimeError> {
+    env: &Environment<Value>) -> Result<Value, RuntimeError> {
     match env.get(name).cloned() {
         Some(Value::Fn(FnValue::Native(f))) => (f)(args),
         Some(Value::Fn(FnValue::UserDefined(decl))) => {
@@ -167,12 +150,13 @@ pub fn eval_call(
                     args.len()
                 )));
             }
-            let snapshot = env.snapshot();
+            // Criação local de subdomínio de estado sem mutação global externa
+            let mut local_env = env.snapshot();
             for ((param_name, _), val) in decl.params.iter().zip(args.into_iter()) {
-                env.declare(param_name.clone(), val);
+                local_env.insert(param_name.clone(), val);
             }
-            let result = exec_stmt(&decl.body, env)?;
-            env.restore(snapshot);
+            let mut dynamic_env = Environment::from_snapshot(local_env);
+            let (_, result) = exec_stmt(&decl.body, &mut dynamic_env)?;
             Ok(result.unwrap_or(Value::Void))
         }
         Some(_) => Err(RuntimeError::new(format!("'{}' is not a function", name))),
