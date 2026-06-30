@@ -40,77 +40,92 @@ use super::eval_expr::{eval_call, eval_expr};
 use super::value::{RuntimeError, Value};
 
 /// `None` = normal fall-through; `Some(v)` = early return with value.
-pub type ExecResult = Result<Option<Value>, RuntimeError>;
+pub type ExecResult = Result<(Environment<Value>, Option<Value>), RuntimeError>;
 
 /// Execute a checked statement. Returns `Some(v)` if a `return` was hit.
-pub fn exec_stmt(stmt: &CheckedStmt, env: &mut Environment<Value>) -> ExecResult {
+/// [Command] ∈ State → (State × Signal)
+pub fn exec_stmt(stmt: &CheckedStmt, mut env: Environment<Value>) -> ExecResult {
     match &stmt.stmt {
         // --- Variable declaration ---
         Statement::Decl { name, init, .. } => {
-            let val = eval_expr(init, env)?;
+            let val = eval_expr(init, &env)?;
             env.declare(name.clone(), val);
-            Ok(None)
+            Ok((env, None))
         }
 
         // --- Assignment ---
         Statement::Assign { target, value } => {
-            let val = eval_expr(value, env)?;
-            assign_lvalue(target, val, env)?;
-            Ok(None)
+            let val = eval_expr(value, &env)?;
+            let mut mut_env = env;
+            assign_lvalue(target, val, &mut mut_env)?;
+            Ok((mut_env, None))
         }
 
         // --- Block ---
         // Only remove variables declared inside the block on exit.
         // Assignments to outer-scope variables must persist (e.g., loop counters).
         Statement::Block { seq } => {
-            let outer_keys = env.names();
+            let outer_keys = env.names(); // Guarda o domínio original (Equivale ao bloco externo do newvar)
+            let mut current_env = env;
+            let mut signal = None;
+
             for s in seq {
-                if let Some(ret) = exec_stmt(s, env)? {
-                    env.remove_new(&outer_keys);
-                    return Ok(Some(ret));
+                // Se houver uma declaração aqui dentro, ela expande o domínio localmente
+                let (next_env, sig) = exec_stmt(s, current_env)?;
+                current_env = next_env;
+                if sig.is_some() {
+                    signal = sig;
+                    break;
                 }
             }
-            env.remove_new(&outer_keys);
-            Ok(None)
+            current_env.remove_new(&outer_keys); // Restrição de Domínio (O "cleanup" do newvar de Reynolds)
+            Ok((current_env, signal))
         }
 
         // --- If ---
-        Statement::If {
+        Statement::If { 
             cond,
             then_branch,
-            else_branch,
-        } => match eval_expr(cond, env)? {
+            else_branch 
+        } => { match eval_expr(cond, &env)? {
             Value::Bool(true) => exec_stmt(then_branch, env),
             Value::Bool(false) => {
                 if let Some(eb) = else_branch {
                     exec_stmt(eb, env)
                 } else {
-                    Ok(None)
+                    Ok((env, None))
                 }
             }
             v => Err(RuntimeError::new(format!(
                 "if condition must be bool, got: {}",
                 v
             ))),
-        },
+            }
+        }
 
         // --- While ---
-        Statement::While { cond, body } => loop {
-            match eval_expr(cond, env)? {
-                Value::Bool(true) => {
-                    if let Some(ret) = exec_stmt(body, env)? {
-                        return Ok(Some(ret));
+        // Least Fixed Point
+        Statement::While { cond, body } => {
+            let mut current_env = env;
+            loop {
+                match eval_expr(cond, &current_env)? {
+                    Value::Bool(true) => {
+                        let (next_env, sig) = exec_stmt(body, current_env)?;
+                        current_env = next_env;
+                        if sig.is_some() {
+                            return Ok((current_env, sig));
+                        }
+                    }
+                    Value::Bool(false) => return Ok((current_env, None)),
+                    v => {
+                        return Err(RuntimeError::new(format!(
+                            "while condition must be bool, got: {}",
+                            v
+                        ))),
                     }
                 }
-                Value::Bool(false) => return Ok(None),
-                v => {
-                    return Err(RuntimeError::new(format!(
-                        "while condition must be bool, got: {}",
-                        v
-                    )))
-                }
             }
-        },
+        }
         
         // --- Switch ---
         Statement::Switch { target, cases, default } => {
@@ -127,7 +142,7 @@ pub fn exec_stmt(stmt: &CheckedStmt, env: &mut Environment<Value>) -> ExecResult
             }
 
             // Avalia o valor da expressão alvo
-            let target_val = eval_expr(target, env)?;
+            let target_val = eval_expr(target, &env)?;
 
             // Determina qual bloco de comandos executar (Padrão: default)
             let mut stmts_to_exec = default;
@@ -145,33 +160,42 @@ pub fn exec_stmt(stmt: &CheckedStmt, env: &mut Environment<Value>) -> ExecResult
                 }
             }
 
-            // Executa o bloco escolhido isolando o escopo do switch 
-            let outer_keys = env.names();
-            
+            // Preparação do ambiente local (Padrão de Bloco Isolado)
+            let outer_keys = env.names(); // Guarda o domínio original para restrição de escopo (newvar)
+            let mut current_env = env;
+            let mut signal = None;
+
+            // Encadeamento de Estados (State Threading) no loop de comandos
             for stmt in stmts_to_exec {
-                if let Some(ret) = exec_stmt(stmt, env)? {
-                    env.remove_new(&outer_keys); // Limpa o escopo se houver um 'return' no meio
-                    return Ok(Some(ret));
+                let (next_env, sig) = exec_stmt(stmt, current_env)?;
+                current_env = next_env; // O estado de saída vira a entrada do próximo comando
+                
+                if sig.is_some() {
+                    signal = sig;
+                    break; // Interrupção estruturada: guarda o sinal e sai do laço
                 }
             }
             
-            env.remove_new(&outer_keys); // Limpa o escopo no final da execução normal
-            Ok(None)
-        },
+            // Ponto Único de Saída, garante a restrição de domínio 
+            current_env.remove_new(&outer_keys);
+            
+            // Retorna explicitamente a tupla contendo o estado transformado e o sinal
+            Ok((current_env, signal))
+        }
 
         // --- Return ---
         Statement::Return(Some(expr)) => {
-            let val = eval_expr(expr, env)?;
-            Ok(Some(val))
+            let val = eval_expr(expr, &env)?;
+            Ok((env, Some(val)))
         }
-        Statement::Return(None) => Ok(Some(Value::Void)),
+        Statement::Return(None) => Ok((env, Some(Value::Void))),
 
         // --- Statement-level function call ---
         Statement::Call { name, args } => {
-            let arg_vals: Result<Vec<Value>, RuntimeError> =
-                args.iter().map(|a| eval_expr(a, env)).collect();
-            eval_call(name, arg_vals?, env)?;
-            Ok(None)
+            let arg_vals: Result<Vec<Value>, RuntimeError> = 
+                args.iter().map(|a| eval_expr(a, &env)).collect();
+            eval_call(name, arg_vals?, &env)?;
+            Ok((env, None))
         }
     }
 }
