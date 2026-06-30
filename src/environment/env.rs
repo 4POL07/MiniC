@@ -68,6 +68,12 @@ impl<V: Clone> Environment<V> {
         }
     }
 
+    pub fn from_snapshot(snapshot: HashMap<String, V>) -> Self {
+        Self {
+            bindings: snapshot,
+        }
+    }
+
     /// Bind `name` to `value`, overwriting any existing binding.
     pub fn declare(&mut self, name: impl Into<String>, value: V) {
         self.bindings.insert(name.into(), value);

@@ -121,7 +121,7 @@ pub fn exec_stmt(stmt: &CheckedStmt, mut env: Environment<Value>) -> ExecResult 
                         return Err(RuntimeError::new(format!(
                             "while condition must be bool, got: {}",
                             v
-                        ))),
+                        )))
                     }
                 }
             }

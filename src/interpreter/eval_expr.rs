@@ -155,8 +155,8 @@ pub fn eval_call(
             for ((param_name, _), val) in decl.params.iter().zip(args.into_iter()) {
                 local_env.insert(param_name.clone(), val);
             }
-            let mut dynamic_env = Environment::from_snapshot(local_env);
-            let (_, result) = exec_stmt(&decl.body, &mut dynamic_env)?;
+            let dynamic_env = Environment::from_snapshot(local_env);
+            let (_, result) = exec_stmt(&decl.body, dynamic_env)?;
             Ok(result.unwrap_or(Value::Void))
         }
         Some(_) => Err(RuntimeError::new(format!("'{}' is not a function", name))),
