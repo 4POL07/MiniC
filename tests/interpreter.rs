@@ -408,3 +408,48 @@ fn test_switch_exec_complex_target() {
     assert!(run(src.trim()).is_ok(), "{}", run(src.trim()).unwrap_err());
 }
 
+
+// ---------------------------------------------------------------------------
+// For statement 
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_for_loop_execution() {
+    let src = r#"
+        void main() {
+            int acc = 0;
+            for (int i = 1; i <= 3; i = i + 1) {
+                acc = acc + i;
+            }
+        }
+    "#;
+    assert!(run(src).is_ok(), "{}", run(src).unwrap_err());
+}
+
+#[test]
+fn test_for_no_iteration() {
+    let src = r#"
+        void main() {
+            int x = 0;
+            for (int i = 0; false; i = i + 1) {
+                x = 1;
+            }
+        }
+    "#;
+    assert!(run(src).is_ok(), "{}", run(src).unwrap_err());
+}
+
+#[test]
+fn test_for_scope_isolation() {
+    let src = r#"
+        void main() {
+            for (int i = 0; i < 5; i = i + 1) {
+                int x = i;
+            }
+            // Erro esperado! A variável 'i' não deve existir fora do loop
+            // porque o desaçucaramento a isolou dentro de um Bloco local (newvar).
+            int de_erro = i; 
+        }
+    "#;
+    assert!(run(src).is_err(), "A variável 'i' vazou do escopo do laço 'for'!");
+}

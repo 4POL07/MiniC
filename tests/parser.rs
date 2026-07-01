@@ -890,3 +890,55 @@ fn test_switch_in_while() {
         }
     }
 }
+
+// --- For ---
+#[test]
+fn test_simple_for_desugaring() {
+    let result = statement("for (int i = 0; i < 10; i = i + 1) { x = 1; }").unwrap().1;
+    
+    // Extrai o bloco principal (newvar) gerado pelo for
+    if let Statement::Block { ref seq } = result.stmt {
+        assert_eq!(seq.len(), 2, "O bloco do for deveria ter 2 comandos (Decl e While)");
+        
+        // Valida que o primeiro comando é a declaração da variável 'i'
+        assert!(matches!(seq[0].stmt, Statement::Decl { .. }));
+        
+        // Extrai o While gerado
+        if let Statement::While { ref cond, ref body } = seq[1].stmt {
+            assert!(matches!(cond.exp, Expr::Lt(_, _)), "A condição deveria ser um menor que (Lt)");
+            
+            // Extrai o bloco interno que contém (corpo + passo)
+            if let Statement::Block { seq: ref seq_inner } = body.stmt {
+                assert_eq!(seq_inner.len(), 2, "O bloco interno do while deveria ter 2 comandos");
+                
+                // Valida que o Nó 0 é um Bloco contendo o corpo original do laço
+                assert!(matches!(seq_inner[0].stmt, Statement::Block { .. }), "O Nó 0 deveria ser o bloco do corpo original");
+                
+                // Valida que o Nó 1 é a Atribuição do passo de incremento (i = i + 1)
+                assert!(matches!(seq_inner[1].stmt, Statement::Assign { .. }), "O Nó 1 deveria ser a atribuição de incremento");
+            } else {
+                panic!("O corpo do while deveria ser um Statement::Block");
+            }
+        } else {
+            panic!("O segundo comando do bloco deveria ser um Statement::While");
+        }
+    } else {
+        panic!("O desaçucaramento do for deveria retornar um Statement::Block");
+    }
+}
+
+#[test]
+fn test_for_whitespace() {
+    assert!(statement("for(int i=0;i<10;i=i+1){print(i);}").is_ok());
+    assert!(statement("for ( int i = 0 ; i < 10 ; i = i + 1 ) { print(i) ; }").is_ok());
+}
+
+#[test]
+fn test_invalid_for() {
+    // Falta parênteses ou chaves
+    assert!(statement("for int i = 0; i < 10; i = i + 1 { print(i); }").is_err());
+    // Falta ponto e vírgula na condição
+    assert!(statement("for (int i = 0; i < 10 i = i + 1) { print(i); }").is_err());
+    // Falta o comando de atualização
+    assert!(statement("for (int i = 0; i < 10; ) { print(i); }").is_err());
+}
