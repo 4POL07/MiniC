@@ -68,6 +68,7 @@ pub fn statement(input: &str) -> IResult<&str, UncheckedStmt> {
             block_statement,
             if_statement,
             while_statement,
+            for_statement,
             switch_statement,
             return_statement,
             decl_statement,
@@ -203,6 +204,65 @@ fn switch_statement(input: &str) -> IResult<&str, UncheckedStmt> {
             cases,
             default,
         }),
+    ))
+}
+
+/// Parse a for statement and desugar it immediately into a Block + While
+fn for_statement(input: &str) -> IResult<&str, UncheckedStmt> {
+    let (rest, _) = preceded(multispace0, tag("for"))(input)?;
+    let (rest, _) = preceded(multispace0, char('('))(rest)?;
+    
+    // Captura a inicialização (assume que decl_statement já consome o seu próprio ';')
+    let (rest, init_stmt) = preceded(multispace0, decl_statement)(rest)?;
+    
+    // Captura a condição (i < 10) e o ';'
+    let (rest, cond_expr) = preceded(multispace0, expression)(rest)?;
+    let (rest, _) = preceded(multispace0, char(';'))(rest)?;
+    
+    // Captura a atualização (i = i + 1) sem exigir ';' no final
+    let (rest, (target, _, value)) = tuple((
+        lvalue,
+        preceded(multispace0, tag("=")),
+        preceded(multispace0, expression),
+    ))(rest)?;
+    
+    let update_stmt = StatementD {
+        stmt: Statement::Assign { 
+            target: Box::new(target), 
+            value: Box::new(value) 
+        },
+        ty: (),
+    };
+    let (rest, _) = preceded(multispace0, char(')'))(rest)?;
+    
+    // Captura qualquer comando como corpo (com ou sem chaves)
+    let (rest, body_stmt) = preceded(multispace0, statement)(rest)?;
+
+    // Em vez de quebrar o bloco existente, criamos uma nova sequência
+    let body_seq = vec![body_stmt, update_stmt];
+    let loop_body = StatementD {
+        stmt: Statement::Block { seq: body_seq },
+        ty: (),
+    };
+
+    // Cria o While: while (condição) { corpo; atualização; }
+    let while_stmt = StatementD {
+        stmt: Statement::While {
+            cond: Box::new(cond_expr),
+            body: Box::new(loop_body),
+        },
+        ty: (),
+    };
+
+    // Retorna o Bloco Externo (newvar): { inicialização; while (...) { ... } }
+    Ok((
+        rest,
+        StatementD {
+            stmt: Statement::Block {
+                seq: vec![init_stmt, while_stmt],
+            },
+            ty: (),
+        },
     ))
 }
 
