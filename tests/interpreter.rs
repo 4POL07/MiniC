@@ -453,3 +453,44 @@ fn test_for_scope_isolation() {
     "#;
     assert!(run(src).is_err(), "A variável 'i' vazou do escopo do laço 'for'!");
 }
+
+#[test]
+fn test_fibonacci_with_for() {
+    let src = r#"
+        void main() {
+            int n = 6;
+            int a = 0;
+            int b = 1;
+            for (int i = 2; i <= n; i = i + 1) {
+                int next = a + b;
+                a = b;
+                b = next;
+            }
+        }
+    "#;
+    assert!(run(src).is_ok(), "Erro ao rodar Fibonacci: {}", run(src).unwrap_err());
+}
+
+#[test]
+fn test_fast_exponentiation_with_switch_and_for() {
+    let src = r#"
+        void main() {
+            int base = 2;
+            int exp = 10;
+            int res = 1;
+            for (int dummy = 0; exp > 0; exp = exp / 2) {
+                int metade = exp / 2;
+                int r = exp - (metade * 2);
+                
+                switch (r) {
+                    case 1:
+                        res = res * base;
+                    default:
+                        int nada = 0;
+                }
+                base = base * base;
+            }
+        }
+    "#;
+    assert!(run(src).is_ok(), "Erro ao rodar Fast Exponentiation: {}", run(src).unwrap_err());
+}
